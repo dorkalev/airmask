@@ -104,7 +104,8 @@
 
 <div id="hud"><div id="status">ready</div></div>
 <div class="toolbar" style="display:none" id="toolbar">
-  <button class="tool" id="capture">🪞 my face → model</button>
+  <button class="tool" id="leave">🎭 leave my face</button>
+  <button class="tool" id="capture">🙂 see my face</button>
   <button class="tool" id="pip">📷 cam</button>
   <button class="tool" id="loadvrm">🎭 avatars</button>
 </div>
@@ -120,9 +121,9 @@
   <div>
     <div class="title">AIR<span class="zap">MASK</span></div>
     <div class="tag">WEAR ANY FACE</div>
-    <p class="sub">Your webcam drives a <b>3D avatar</b> in real time — head turns, blinks,
-      smiles, gaze and expressions, all read <b>100% on-device</b> in the browser
-      (MediaPipe Face Landmarker + WebGPU). Nothing about your camera is uploaded.</p>
+    <p class="sub">A <b>face relay</b>: you arrive <b>wearing the last visitor's face</b> — driven live
+      by your own head, blinks and expressions — then <b>leave your face</b> for whoever comes next.
+      Tracked <b>100% on-device</b> (MediaPipe + WebGPU); a stored mask, not a video feed.</p>
     <div class="btnrow">
       <button class="btn" id="start">START ▸</button>
       <button class="btn alt" id="pick">use your own .vrm</button>
@@ -195,7 +196,7 @@ addEventListener('resize', resize); resize();
 const clock = new THREE.Clock();
 let vrm = null, headBone = null;
 let lastLandmarks = null;                     // for "my face → model" capture
-let maskMesh = null, maskGeo = null, maskCanvas = null, maskTex = null, maskLive = false;
+let maskMesh = null, maskGeo = null, maskCanvas = null, maskTex = null, maskLive = false, wearing = false;
 
 // ---------------------------------------------------------------- VRM loading
 async function loadVRM(url) {
@@ -369,7 +370,7 @@ function captureFaceModel() {
   maskMesh = new THREE.Mesh(maskGeo, new THREE.MeshBasicMaterial({ map: maskTex, side: THREE.DoubleSide }));
   if (vrm) vrm.scene.visible = false;
   scene.add(maskMesh);
-  maskLive = true;                                   // ← now it's your live avatar
+  maskLive = true; wearing = false;                  // ← now it's your OWN live face
 
   const box = new THREE.Box3().setFromObject(maskMesh);
   const c = new THREE.Vector3(); box.getCenter(c);
@@ -419,11 +420,80 @@ async function postMask() {
   setStatus('gallery needs the Firebase project (Stage 2) — coming once it exists', 'warn');
 }
 
-function backToAvatar() {
-  maskLive = false;
-  if (maskMesh) { scene.remove(maskMesh); maskGeo.dispose(); maskMesh = null; maskGeo = null; }
-  if (vrm) { vrm.scene.visible = true; frameFace(); }
+// ---------------------------------------- FACE RELAY (wear the former visitor's face)
+const FACE_KEY = 'airmask-face-relay';   // local prototype store; Firebase in stage 2
+function clearMask() {
+  wearing = false; maskLive = false;
+  if (maskMesh) { scene.remove(maskMesh); maskGeo && maskGeo.dispose(); maskMesh = null; maskGeo = null; }
   $('maskbar').style.display = 'none';
+}
+// leave MY face for the next visitor (downscaled JPEG + landmarks)
+function saveMyFace() {
+  if (!lastLandmarks) { setStatus('no face to leave — look at the camera', 'warn'); return; }
+  const lm = lastLandmarks.map(p => [ +p.x.toFixed(4), +p.y.toFixed(4), +p.z.toFixed(4) ]);
+  const s = Math.min(1, 320 / (video.videoWidth || 640));
+  const c = document.createElement('canvas');
+  c.width = (video.videoWidth || 640) * s; c.height = (video.videoHeight || 480) * s;
+  c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+  try {
+    localStorage.setItem(FACE_KEY, JSON.stringify({ lm, img: c.toDataURL('image/jpeg', 0.82) }));
+    setStatus('you left your face 👋 — the next visitor will wear it · reload to inherit the current one');
+  } catch (e) { setStatus('could not save your face (storage full)', 'err'); }
+}
+function loadFormerFace() {
+  try { const s = localStorage.getItem(FACE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
+}
+// wear a stored face: its texture + UVs stay theirs; YOUR landmarks drive the shape
+function wearFormerFace(data) {
+  return new Promise((resolve) => {
+    const lm = data.lm, N = lm.length;
+    const im = new Image();
+    im.onload = () => {
+      const tc = document.createElement('canvas'); tc.width = im.width; tc.height = im.height;
+      tc.getContext('2d').drawImage(im, 0, 0);
+      maskTex = new THREE.CanvasTexture(tc); maskTex.colorSpace = THREE.SRGBColorSpace; maskTex.flipY = false;
+      const del = Delaunator.from(lm.map(p => [p[0], p[1]]));
+      clearMask();
+      maskGeo = new THREE.BufferGeometry();
+      maskGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+      maskGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2));
+      maskGeo.setIndex(Array.from(del.triangles));
+      const uv = maskGeo.attributes.uv.array, pos = maskGeo.attributes.position.array;
+      for (let i = 0; i < N; i++) {
+        uv[i*2] = lm[i][0]; uv[i*2+1] = lm[i][1];
+        pos[i*3] = (MIRROR ? -1 : 1) * (lm[i][0] - 0.5) * MASK_SCALE;
+        pos[i*3+1] = -(lm[i][1] - 0.5) * MASK_SCALE; pos[i*3+2] = -lm[i][2] * MASK_SCALE;
+      }
+      maskGeo.attributes.uv.needsUpdate = true; maskGeo.attributes.position.needsUpdate = true; maskGeo.computeVertexNormals();
+      maskMesh = new THREE.Mesh(maskGeo, new THREE.MeshBasicMaterial({ map: maskTex, side: THREE.DoubleSide }));
+      if (vrm) vrm.scene.visible = false;
+      scene.add(maskMesh);
+      wearing = true;
+      const box = new THREE.Box3().setFromObject(maskMesh); const cc = new THREE.Vector3(); box.getCenter(cc);
+      const sz = new THREE.Vector3(); box.getSize(sz);
+      lookTarget.copy(cc); camera.position.set(cc.x, cc.y, cc.z + Math.max(1.1, sz.y * 1.9)); camera.lookAt(lookTarget);
+      $('picker').style.display = 'flex';
+      setStatus('you are wearing the last visitor’s face 👻 — move to drive it · “leave my face” for the next');
+      resolve();
+    };
+    im.onerror = () => resolve();
+    im.src = data.img;
+  });
+}
+// per-frame while wearing: only positions follow YOUR landmarks (uv + texture stay theirs)
+function updateWorn() {
+  if (!wearing || !maskMesh || !lastLandmarks) return;
+  const lm = lastLandmarks, pos = maskGeo.attributes.position.array;
+  for (let i = 0; i < lm.length; i++) {
+    pos[i*3] = (MIRROR ? -1 : 1) * (lm[i].x - 0.5) * MASK_SCALE;
+    pos[i*3+1] = -(lm[i].y - 0.5) * MASK_SCALE; pos[i*3+2] = -lm[i].z * MASK_SCALE;
+  }
+  maskGeo.attributes.position.needsUpdate = true; maskGeo.computeVertexNormals();
+}
+
+function backToAvatar() {
+  clearMask();
+  if (vrm) { vrm.scene.visible = true; frameFace(); }
   $('picker').style.display = 'flex';
   setStatus('tracking · you are the avatar 🎭');
 }
@@ -453,7 +523,8 @@ function loop() {
   if (gotFace) faceMs = performance.now();
   else if (faceMs && performance.now() - faceMs > 800) { setStatus('no face — come into frame', 'warn'); faceMs = 0; }
 
-  updateMaskLive();                 // if a face-mask avatar is active, reshape it to you
+  updateMaskLive();                 // your own live face (self-capture mode)
+  updateWorn();                     // the former visitor's face, driven by your landmarks
   idle(dt, gotFace);
   if (vrm) vrm.update(dt);
   renderer.render(scene, camera);
@@ -478,6 +549,7 @@ function setActiveChip(i) {
   document.querySelectorAll('#picker .chip').forEach(c => c.classList.toggle('active', +c.dataset.i === i));
 }
 async function selectModel(i) {
+  clearMask();                                        // leaving any worn/self face
   setActiveChip(i);
   await loadVRM(MODELS[i].u).catch(() => setStatus('that avatar failed to load', 'err'));
 }
@@ -491,7 +563,11 @@ async function engage(vrmUrl) {
     setBoot('starting camera…');
     await Promise.all([startCamera(), initFace()]);
     if (vrmUrl) { setActiveChip(-1); await loadVRM(vrmUrl); }
-    else await selectModel(0);
+    else {
+      const former = loadFormerFace();               // the face the last visitor left
+      if (former) await wearFormerFace(former);       // ← you arrive wearing them
+      else { await selectModel(0); setStatus('no former face yet — you’re first! “leave my face” for the next visitor'); }
+    }
     running = true; clock.start(); loop();
   } catch (e) {
     console.error(e);
@@ -506,6 +582,7 @@ $('pick').onclick  = () => $('vrmfile').click();
 $('loadvrm').onclick = () => { const p = $('picker'); p.style.display = (!p.style.display || p.style.display === 'none') ? 'flex' : 'none'; };
 $('pip').onclick = () => { video.style.display = video.style.display === 'block' ? 'none' : 'block'; };
 $('capture').onclick = captureFaceModel;
+$('leave').onclick = saveMyFace;
 $('dl').onclick = downloadMask;
 $('post').onclick = postMask;
 $('back').onclick = backToAvatar;
@@ -513,7 +590,7 @@ $('vrmfile').onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
   if (!engaged) await engage(url);
-  else { setActiveChip(-1); await loadVRM(url).catch(() => setStatus('that .vrm failed to load', 'err')); }
+  else { clearMask(); setActiveChip(-1); await loadVRM(url).catch(() => setStatus('that .vrm failed to load', 'err')); }
 };
 
 // debug handle
