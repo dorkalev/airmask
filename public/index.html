@@ -195,7 +195,7 @@ addEventListener('resize', resize); resize();
 const clock = new THREE.Clock();
 let vrm = null, headBone = null;
 let lastLandmarks = null;                     // for "my face → model" capture
-let maskMesh = null, maskGeo = null, maskCanvas = null, maskTex = null, maskLive = false;
+let maskMesh = null, maskGeo = null, maskCanvas = null, maskTex = null, maskLive = false, robotGroup = null;
 
 // ---------------------------------------------------------------- VRM loading
 async function loadVRM(url) {
@@ -347,6 +347,35 @@ function writeMaskGeometry(lm) {
   maskGeo.computeVertexNormals();
 }
 
+// build a stylized robot whose "screen" is the live face-mesh, so the flat face
+// relief reads as a real 3D model once it turns.
+function buildRobot(faceMesh) {
+  const g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: 0x262a35, metalness: 0.75, roughness: 0.35 });
+  const cyan  = new THREE.MeshStandardMaterial({ color: 0x06121a, emissive: 0x29f4ff, emissiveIntensity: 1.5, metalness: 0.4, roughness: 0.3 });
+  const pink  = new THREE.MeshStandardMaterial({ color: 0x1a0610, emissive: 0xff2e88, emissiveIntensity: 1.8 });
+  const add = (geo, mat, x, y, z, name) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); if (name) m.name = name; g.add(m); return m; };
+
+  add(new THREE.BoxGeometry(2.7, 3.1, 1.8), metal, 0, 0, -1.0);                 // head housing
+  // glowing bezel around the face (also crops the mesh's outer webbing)
+  add(new THREE.BoxGeometry(2.7, 0.14, 0.25), cyan, 0,  1.35, 0.28);
+  add(new THREE.BoxGeometry(2.7, 0.14, 0.25), cyan, 0, -1.35, 0.28);
+  add(new THREE.BoxGeometry(0.14, 2.8, 0.25), cyan, -1.28, 0, 0.28);
+  add(new THREE.BoxGeometry(0.14, 2.8, 0.25), cyan,  1.28, 0, 0.28);
+  // ear pods
+  [-1.5, 1.5].forEach(x => { const e = add(new THREE.CylinderGeometry(0.28, 0.28, 0.35, 20), cyan, x, 0, -1.0); e.rotation.z = Math.PI / 2; });
+  // antenna + blinking bulb
+  add(new THREE.CylinderGeometry(0.04, 0.04, 0.7, 10), metal, 0.55, 2.0, -1.0);
+  add(new THREE.SphereGeometry(0.14, 16, 16), pink, 0.55, 2.42, -1.0, 'bulb');
+  // neck + body + chest light
+  add(new THREE.CylinderGeometry(0.38, 0.42, 0.6, 20), metal, 0, -1.9, -1.0);
+  add(new THREE.BoxGeometry(3.4, 1.6, 1.9), metal, 0, -3.0, -1.0);
+  add(new THREE.BoxGeometry(0.8, 0.25, 0.1), cyan, 0, -2.7, -0.03);
+
+  g.add(faceMesh);                                    // live face at the group origin (front)
+  return g;
+}
+
 function captureFaceModel() {
   if (!lastLandmarks) { setStatus('no face to capture — look at the camera', 'warn'); return; }
   const lm = lastLandmarks, N = lm.length;
@@ -359,7 +388,7 @@ function captureFaceModel() {
 
   // triangulation is fixed at capture (landmark order is constant → reusable each frame)
   const del = Delaunator.from(lm.map(p => [p.x, p.y]));
-  if (maskMesh) { scene.remove(maskMesh); maskGeo.dispose(); }
+  if (robotGroup) { scene.remove(robotGroup); maskGeo && maskGeo.dispose(); }
   maskGeo = new THREE.BufferGeometry();
   maskGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
   maskGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2));
@@ -368,19 +397,21 @@ function captureFaceModel() {
 
   maskMesh = new THREE.Mesh(maskGeo, new THREE.MeshBasicMaterial({ map: maskTex, side: THREE.DoubleSide }));
   if (vrm) vrm.scene.visible = false;
-  scene.add(maskMesh);
+  robotGroup = buildRobot(maskMesh);
+  scene.add(robotGroup);
   maskLive = true;                                   // ← now it's your live avatar
 
-  const box = new THREE.Box3().setFromObject(maskMesh);
+  // frame the robot from a 3/4 angle (off to the side) so it reads as an object
+  const box = new THREE.Box3().setFromObject(robotGroup);
   const c = new THREE.Vector3(); box.getCenter(c);
   const sz = new THREE.Vector3(); box.getSize(sz);
   lookTarget.copy(c);
-  camera.position.set(c.x, c.y, c.z + Math.max(1.1, sz.y * 1.9));
+  camera.position.set(c.x + sz.x * 0.5, c.y + 0.3, c.z + Math.max(sz.x, sz.y) * 1.35);
   camera.lookAt(lookTarget);
 
   $('maskbar').style.display = 'flex';
   $('picker').style.display = 'none';
-  setStatus('this is you now 🪞 — move around · download or post it');
+  setStatus('this is you now 🤖 — it turns so you can see it’s a model · download or post it');
 }
 
 // per-frame: refresh the mask texture from the camera and re-shape it to the face
@@ -392,9 +423,9 @@ function updateMaskLive() {
 }
 
 async function downloadMask() {
-  if (!maskMesh) return;
+  if (!robotGroup) return;
   setStatus('exporting .glb…', 'warn');
-  new GLTFExporter().parse(maskMesh, (glb) => {
+  new GLTFExporter().parse(robotGroup, (glb) => {
     const blob = new Blob([glb], { type: 'model/gltf-binary' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'airmask-face.glb'; a.click();
@@ -406,8 +437,8 @@ async function downloadMask() {
 // export the current mask as a GLB Blob (used by both download and, in Stage 2, upload)
 function maskToGLB() {
   return new Promise((res, rej) => {
-    if (!maskMesh) return rej(new Error('no mask'));
-    new GLTFExporter().parse(maskMesh, glb => res(new Blob([glb], { type: 'model/gltf-binary' })),
+    if (!robotGroup) return rej(new Error('no mask'));
+    new GLTFExporter().parse(robotGroup, glb => res(new Blob([glb], { type: 'model/gltf-binary' })),
       rej, { binary: true });
   });
 }
@@ -421,7 +452,7 @@ async function postMask() {
 
 function backToAvatar() {
   maskLive = false;
-  if (maskMesh) { scene.remove(maskMesh); maskGeo.dispose(); maskMesh = null; maskGeo = null; }
+  if (robotGroup) { scene.remove(robotGroup); maskGeo && maskGeo.dispose(); robotGroup = null; maskMesh = null; maskGeo = null; }
   if (vrm) { vrm.scene.visible = true; frameFace(); }
   $('maskbar').style.display = 'none';
   $('picker').style.display = 'flex';
@@ -454,6 +485,11 @@ function loop() {
   else if (faceMs && performance.now() - faceMs > 800) { setStatus('no face — come into frame', 'warn'); faceMs = 0; }
 
   updateMaskLive();                 // if a face-mask avatar is active, reshape it to you
+  if (robotGroup) {                 // slow turntable + blinking antenna
+    robotGroup.rotation.y += dt * 0.6;
+    const bulb = robotGroup.getObjectByName('bulb');
+    if (bulb) bulb.material.emissiveIntensity = 1.1 + Math.sin(clock.elapsedTime * 4) * 0.8;
+  }
   idle(dt, gotFace);
   if (vrm) vrm.update(dt);
   renderer.render(scene, camera);
