@@ -75,6 +75,18 @@
     background:#12121ecc; border:1px solid #ffffff1c; border-radius:10px; padding:8px 12px; cursor:pointer; }
   .tool:hover { border-color:#ffffff44; color:#fff; }
 
+  .maskbar { position:fixed; top:52px; left:0; right:0; z-index:9; display:flex; gap:8px; justify-content:center; flex-wrap:wrap; padding:0 12px; }
+  .picker { position:fixed; left:0; right:0; bottom:0; z-index:8; display:flex; gap:8px;
+    padding:14px 14px 16px; overflow-x:auto; scrollbar-width:none;
+    background:linear-gradient(#0000, #0a0a12dd 55%); }
+  .picker::-webkit-scrollbar { display:none; }
+  .chip { flex:0 0 auto; font-family:'Fragment Mono', monospace; font-size:12px; color:#cfe;
+    background:#12121ecc; border:1px solid #ffffff1c; border-radius:11px; padding:9px 15px;
+    cursor:pointer; white-space:nowrap; }
+  .chip:hover { border-color:#ffffff44; color:#fff; }
+  .chip.active { background:var(--cyan); color:#0a0a12; border-color:var(--cyan); font-weight:bold; }
+  .chip.up { border-style:dashed; color:var(--lime); border-color:#b6ff2e55; }
+
   .footer { position:fixed; bottom:10px; left:0; right:0; z-index:6; text-align:center;
     font-size:11px; color:#667; letter-spacing:.04em; pointer-events:none; }
   .footer a { color:var(--cyan); text-decoration:none; pointer-events:auto; }
@@ -92,9 +104,16 @@
 
 <div id="hud"><div id="status">ready</div></div>
 <div class="toolbar" style="display:none" id="toolbar">
+  <button class="tool" id="capture">🪞 my face → model</button>
   <button class="tool" id="pip">📷 cam</button>
-  <button class="tool" id="loadvrm">🎭 avatar</button>
+  <button class="tool" id="loadvrm">🎭 avatars</button>
 </div>
+<div class="maskbar" id="maskbar" style="display:none">
+  <button class="chip" id="dl">⬇ download .glb</button>
+  <button class="chip up" id="post">☁ post to gallery</button>
+  <button class="chip" id="back">↩ back to avatar</button>
+</div>
+<div class="picker" id="picker" style="display:none"></div>
 
 <!-- LANDING -->
 <div class="overlay" id="boot">
@@ -124,13 +143,29 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import Delaunator from 'https://cdn.jsdelivr.net/npm/delaunator@5/+esm';
 
 const $ = id => document.getElementById(id);
 const MODEL_TASK = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const WASM_BASE  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 // a small VRM1 sample so first-run has an avatar; users can drop their own .vrm
-const DEFAULT_VRM = 'https://cdn.jsdelivr.net/gh/pixiv/three-vrm@v3.4.0/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';   // gh CDN (examples aren't in the npm pkg)
+// curated free VRoid sample avatars (from github.com/madjin/vrm-samples, all verified reachable)
+const VBASE = 'https://cdn.jsdelivr.net/gh/madjin/vrm-samples@master/';
+const MODELS = [
+  { n: 'Shino',    u: VBASE + 'vroid/beta/Sendagaya_Shino.vrm' },
+  { n: 'Victoria', u: VBASE + 'vroid/beta/Victoria_Rubin.vrm' },
+  { n: 'Vivi',     u: VBASE + 'vroid/beta/Vivi.vrm' },
+  { n: 'Shibu',    u: VBASE + 'vroid/beta/Sendagaya_Shibu.vrm' },
+  { n: 'Fumiriya', u: VBASE + 'vroid/beta/Sakurada_Fumiriya.vrm' },
+  { n: 'Darkness', u: VBASE + 'vroid/beta/Darkness_Shibu.vrm' },
+  { n: 'Vita',     u: VBASE + 'vroid/beta/Vita.vrm' },
+  { n: 'Avatar A', u: VBASE + 'vroid/stable/AvatarSample_A.vrm' },
+  { n: 'Avatar B', u: VBASE + 'vroid/stable/AvatarSample_B.vrm' },
+  { n: 'Avatar C', u: VBASE + 'vroid/stable/AvatarSample_C.vrm' },
+];
+const DEFAULT_VRM = MODELS[0].u;
 const MIRROR = true;   // move right → avatar moves right (mirror), like a real mirror
 
 const setStatus = (t, cls='') => { const s=$('status'); s.className=cls; s.innerHTML=t; };
@@ -159,6 +194,7 @@ addEventListener('resize', resize); resize();
 
 const clock = new THREE.Clock();
 let vrm = null, headBone = null;
+let lastLandmarks = null, maskMesh = null;   // for "my face → model" capture
 
 // ---------------------------------------------------------------- VRM loading
 async function loadVRM(url) {
@@ -172,15 +208,29 @@ async function loadVRM(url) {
   vrm = next;
   VRMUtils.removeUnnecessaryVertices(gltf.scene);
   VRMUtils.combineSkeletons(gltf.scene);
-  // VRM0 faces +Z (away from a +Z camera) → rotate to face us; VRM1 already faces -Z
+  // three-vrm loads VRM1 already facing the +Z camera; only legacy VRM0 needs
+  // the 180° flip. (Rotating VRM1 by hand shows the back of the head.)
   if (vrm.meta?.metaVersion === '0') VRMUtils.rotateVRM0(vrm);
-  else vrm.scene.rotation.y = Math.PI;
   vrm.scene.traverse(o => { o.frustumCulled = false; });
   scene.add(vrm.scene);
   headBone = vrm.humanoid?.getNormalizedBoneNode('head') || null;
-  // aim gaze at the camera by default
   if (vrm.lookAt) vrm.lookAt.target = camera;
+  frameFace();                       // portrait framing on the head
   setStatus('show me your face 🙂', 'warn');
+}
+
+// frame the camera on the avatar's head (head-and-shoulders portrait)
+function frameFace() {
+  if (!vrm) return;
+  vrm.scene.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  const eyeY = box.max.y - size.y * 0.09;                 // ~eye height
+  lookTarget.set(center.x, eyeY, center.z);
+  camera.position.set(center.x, eyeY, box.max.z + Math.max(0.55, size.y * 0.5));
+  camera.lookAt(lookTarget);
+  if (vrm.lookAt) vrm.lookAt.target = camera;
 }
 
 // ------------------------------------------------------ MediaPipe FaceLandmarker
@@ -278,6 +328,87 @@ function idle(dt, gotFace) {
   }
 }
 
+// ---------------------------------------- "my face → model": build a textured
+// 3D mesh from the current frame's 478 landmarks + the camera image. Triangles
+// come from a Delaunay of the projected points (no MediaPipe constant needed).
+function captureFaceModel() {
+  if (!lastLandmarks) { setStatus('no face to capture — look at the camera', 'warn'); return; }
+  const lm = lastLandmarks;
+  // texture = current camera frame
+  const tc = document.createElement('canvas');
+  tc.width = video.videoWidth || 640; tc.height = video.videoHeight || 480;
+  tc.getContext('2d').drawImage(video, 0, 0, tc.width, tc.height);
+  const tex = new THREE.CanvasTexture(tc);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
+
+  const del = Delaunator.from(lm.map(p => [p.x, p.y]));
+  const N = lm.length, S = 2.2;
+  const positions = new Float32Array(N * 3), uvs = new Float32Array(N * 2);
+  for (let i = 0; i < N; i++) {
+    positions[i*3]   =  (lm[i].x - 0.5) * S;
+    positions[i*3+1] = -(lm[i].y - 0.5) * S;
+    positions[i*3+2] = -lm[i].z * S;
+    uvs[i*2] = lm[i].x; uvs[i*2+1] = lm[i].y;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.setIndex(Array.from(del.triangles));
+  geo.computeVertexNormals();
+
+  if (maskMesh) { scene.remove(maskMesh); maskMesh.geometry.dispose(); }
+  maskMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  if (vrm) vrm.scene.visible = false;
+  scene.add(maskMesh);
+
+  const box = new THREE.Box3().setFromObject(maskMesh);
+  const c = new THREE.Vector3(); box.getCenter(c);
+  const sz = new THREE.Vector3(); box.getSize(sz);
+  lookTarget.copy(c);
+  camera.position.set(c.x, c.y, c.z + Math.max(1.1, sz.y * 1.9));
+  camera.lookAt(lookTarget);
+
+  $('maskbar').style.display = 'flex';
+  $('picker').style.display = 'none';
+  setStatus('your face → 3D model 🪞 — download it, or post it for the next visitor');
+}
+
+async function downloadMask() {
+  if (!maskMesh) return;
+  setStatus('exporting .glb…', 'warn');
+  new GLTFExporter().parse(maskMesh, (glb) => {
+    const blob = new Blob([glb], { type: 'model/gltf-binary' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'airmask-face.glb'; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    setStatus('saved airmask-face.glb 💾');
+  }, (err) => { console.error(err); setStatus('export failed', 'err'); }, { binary: true });
+}
+
+// export the current mask as a GLB Blob (used by both download and, in Stage 2, upload)
+function maskToGLB() {
+  return new Promise((res, rej) => {
+    if (!maskMesh) return rej(new Error('no mask'));
+    new GLTFExporter().parse(maskMesh, glb => res(new Blob([glb], { type: 'model/gltf-binary' })),
+      rej, { binary: true });
+  });
+}
+
+async function postMask() {
+  // Saving "for the next user" is the server gallery — the AIRSLICE Storage
+  // pattern applied to .glb models. It needs this project's own Firebase, which
+  // isn't wired yet (config.js still has placeholders). Stage 2.
+  setStatus('gallery needs the Firebase project (Stage 2) — coming once it exists', 'warn');
+}
+
+function backToAvatar() {
+  if (maskMesh) { scene.remove(maskMesh); maskMesh.geometry.dispose(); maskMesh = null; }
+  if (vrm) { vrm.scene.visible = true; frameFace(); }
+  $('maskbar').style.display = 'none';
+  $('picker').style.display = 'flex';
+  setStatus('tracking · you are the avatar 🎭');
+}
+
 // ---------------------------------------------------------------- main loop
 let running = false, lastVideoTime = -1, faceMs = 0;
 function loop() {
@@ -293,8 +424,9 @@ function loop() {
       if (res.faceBlendshapes?.length) {
         applyBlendshapes(res.faceBlendshapes[0].categories);
         applyHeadPose(res.facialTransformationMatrixes?.[0]?.data);
+        if (res.faceLandmarks?.length) lastLandmarks = res.faceLandmarks[0];
         gotFace = true;
-        if (!faceMs) setStatus('tracking · you are the avatar 🎭');
+        if (!faceMs && !maskMesh) setStatus('tracking · you are the avatar 🎭');
         faceMs = performance.now();
       }
     } catch (e) { /* transient frame errors are fine */ }
@@ -309,18 +441,37 @@ function loop() {
 
 // ---------------------------------------------------------------- boot flow
 let engaged = false;
+function buildPicker() {
+  const box = $('picker'); box.innerHTML = '';
+  MODELS.forEach((m, i) => {
+    const c = document.createElement('button');
+    c.className = 'chip'; c.textContent = m.n; c.dataset.i = i;
+    c.onclick = () => selectModel(i);
+    box.appendChild(c);
+  });
+  const up = document.createElement('button');
+  up.className = 'chip up'; up.textContent = '＋ your .vrm';
+  up.onclick = () => $('vrmfile').click();
+  box.appendChild(up);
+}
+function setActiveChip(i) {
+  document.querySelectorAll('#picker .chip').forEach(c => c.classList.toggle('active', +c.dataset.i === i));
+}
+async function selectModel(i) {
+  setActiveChip(i);
+  await loadVRM(MODELS[i].u).catch(() => setStatus('that avatar failed to load', 'err'));
+}
 async function engage(vrmUrl) {
   if (engaged) return; engaged = true;
   $('boot').classList.add('gone');
   $('toolbar').style.display = '';
+  const foot = document.querySelector('.footer'); if (foot) foot.style.display = 'none';
+  buildPicker(); $('picker').style.display = 'flex';
   try {
     setBoot('starting camera…');
     await Promise.all([startCamera(), initFace()]);
-    await loadVRM(vrmUrl || DEFAULT_VRM).catch(async (e) => {
-      console.warn('default VRM failed, asking for a file', e);
-      setStatus('couldn\'t load the sample avatar — drop a .vrm', 'err');
-      $('vrmfile').click();
-    });
+    if (vrmUrl) { setActiveChip(-1); await loadVRM(vrmUrl); }
+    else await selectModel(0);
     running = true; clock.start(); loop();
   } catch (e) {
     console.error(e);
@@ -332,13 +483,17 @@ async function engage(vrmUrl) {
 
 $('start').onclick = () => engage();
 $('pick').onclick  = () => $('vrmfile').click();
-$('loadvrm').onclick = () => $('vrmfile').click();
+$('loadvrm').onclick = () => { const p = $('picker'); p.style.display = (!p.style.display || p.style.display === 'none') ? 'flex' : 'none'; };
 $('pip').onclick = () => { video.style.display = video.style.display === 'block' ? 'none' : 'block'; };
+$('capture').onclick = captureFaceModel;
+$('dl').onclick = downloadMask;
+$('post').onclick = postMask;
+$('back').onclick = backToAvatar;
 $('vrmfile').onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
   if (!engaged) await engage(url);
-  else await loadVRM(url).catch(() => setStatus('that .vrm failed to load', 'err'));
+  else { setActiveChip(-1); await loadVRM(url).catch(() => setStatus('that .vrm failed to load', 'err')); }
 };
 
 // debug handle
