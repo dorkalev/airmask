@@ -194,7 +194,8 @@ addEventListener('resize', resize); resize();
 
 const clock = new THREE.Clock();
 let vrm = null, headBone = null;
-let lastLandmarks = null, maskMesh = null;   // for "my face → model" capture
+let lastLandmarks = null;                     // for "my face → model" capture
+let maskMesh = null, maskGeo = null, maskCanvas = null, maskTex = null, maskLive = false;
 
 // ---------------------------------------------------------------- VRM loading
 async function loadVRM(url) {
@@ -331,35 +332,44 @@ function idle(dt, gotFace) {
 // ---------------------------------------- "my face → model": build a textured
 // 3D mesh from the current frame's 478 landmarks + the camera image. Triangles
 // come from a Delaunay of the projected points (no MediaPipe constant needed).
+const MASK_SCALE = 2.2;
+// write the current landmarks into the mask's position + uv attributes
+function writeMaskGeometry(lm) {
+  const pos = maskGeo.attributes.position.array, uv = maskGeo.attributes.uv.array;
+  for (let i = 0; i < lm.length; i++) {
+    pos[i*3]   = (MIRROR ? -1 : 1) * (lm[i].x - 0.5) * MASK_SCALE;
+    pos[i*3+1] = -(lm[i].y - 0.5) * MASK_SCALE;
+    pos[i*3+2] = -lm[i].z * MASK_SCALE;
+    uv[i*2] = lm[i].x; uv[i*2+1] = lm[i].y;
+  }
+  maskGeo.attributes.position.needsUpdate = true;
+  maskGeo.attributes.uv.needsUpdate = true;
+  maskGeo.computeVertexNormals();
+}
+
 function captureFaceModel() {
   if (!lastLandmarks) { setStatus('no face to capture — look at the camera', 'warn'); return; }
-  const lm = lastLandmarks;
-  // texture = current camera frame
-  const tc = document.createElement('canvas');
-  tc.width = video.videoWidth || 640; tc.height = video.videoHeight || 480;
-  tc.getContext('2d').drawImage(video, 0, 0, tc.width, tc.height);
-  const tex = new THREE.CanvasTexture(tc);
-  tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
+  const lm = lastLandmarks, N = lm.length;
 
+  // a canvas we redraw from the camera each frame → the mask stays textured live
+  maskCanvas = document.createElement('canvas');
+  maskCanvas.width = video.videoWidth || 640; maskCanvas.height = video.videoHeight || 480;
+  maskCanvas.getContext('2d').drawImage(video, 0, 0, maskCanvas.width, maskCanvas.height);
+  maskTex = new THREE.CanvasTexture(maskCanvas); maskTex.colorSpace = THREE.SRGBColorSpace; maskTex.flipY = false;
+
+  // triangulation is fixed at capture (landmark order is constant → reusable each frame)
   const del = Delaunator.from(lm.map(p => [p.x, p.y]));
-  const N = lm.length, S = 2.2;
-  const positions = new Float32Array(N * 3), uvs = new Float32Array(N * 2);
-  for (let i = 0; i < N; i++) {
-    positions[i*3]   =  (lm[i].x - 0.5) * S;
-    positions[i*3+1] = -(lm[i].y - 0.5) * S;
-    positions[i*3+2] = -lm[i].z * S;
-    uvs[i*2] = lm[i].x; uvs[i*2+1] = lm[i].y;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geo.setIndex(Array.from(del.triangles));
-  geo.computeVertexNormals();
+  if (maskMesh) { scene.remove(maskMesh); maskGeo.dispose(); }
+  maskGeo = new THREE.BufferGeometry();
+  maskGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  maskGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2));
+  maskGeo.setIndex(Array.from(del.triangles));
+  writeMaskGeometry(lm);
 
-  if (maskMesh) { scene.remove(maskMesh); maskMesh.geometry.dispose(); }
-  maskMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  maskMesh = new THREE.Mesh(maskGeo, new THREE.MeshBasicMaterial({ map: maskTex, side: THREE.DoubleSide }));
   if (vrm) vrm.scene.visible = false;
   scene.add(maskMesh);
+  maskLive = true;                                   // ← now it's your live avatar
 
   const box = new THREE.Box3().setFromObject(maskMesh);
   const c = new THREE.Vector3(); box.getCenter(c);
@@ -370,7 +380,15 @@ function captureFaceModel() {
 
   $('maskbar').style.display = 'flex';
   $('picker').style.display = 'none';
-  setStatus('your face → 3D model 🪞 — download it, or post it for the next visitor');
+  setStatus('this is you now 🪞 — move around · download or post it');
+}
+
+// per-frame: refresh the mask texture from the camera and re-shape it to the face
+function updateMaskLive() {
+  if (!maskLive || !maskMesh || !lastLandmarks) return;
+  maskCanvas.getContext('2d').drawImage(video, 0, 0, maskCanvas.width, maskCanvas.height);
+  maskTex.needsUpdate = true;
+  writeMaskGeometry(lastLandmarks);
 }
 
 async function downloadMask() {
@@ -402,7 +420,8 @@ async function postMask() {
 }
 
 function backToAvatar() {
-  if (maskMesh) { scene.remove(maskMesh); maskMesh.geometry.dispose(); maskMesh = null; }
+  maskLive = false;
+  if (maskMesh) { scene.remove(maskMesh); maskGeo.dispose(); maskMesh = null; maskGeo = null; }
   if (vrm) { vrm.scene.visible = true; frameFace(); }
   $('maskbar').style.display = 'none';
   $('picker').style.display = 'flex';
@@ -434,6 +453,7 @@ function loop() {
   if (gotFace) faceMs = performance.now();
   else if (faceMs && performance.now() - faceMs > 800) { setStatus('no face — come into frame', 'warn'); faceMs = 0; }
 
+  updateMaskLive();                 // if a face-mask avatar is active, reshape it to you
   idle(dt, gotFace);
   if (vrm) vrm.update(dt);
   renderer.render(scene, camera);
