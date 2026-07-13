@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>AIRMASK — wear any face</title>
+<meta name="description" content="Drive a 3D avatar with your own face — head pose, expressions, blinks and gaze, tracked 100% on-device in the browser (MediaPipe + WebGPU). No mouse, no upload.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%F0%9F%8E%AD%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#0a0a12">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Fragment+Mono&display=swap" rel="stylesheet">
+<!-- three + three-vrm as ES modules -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.4.0/lib/three-vrm.module.js"
+  }
+}
+</script>
+<style>
+  :root { --ink:#fff; --hot:#ff2e88; --cyan:#29f4ff; --lime:#b6ff2e; --violet:#b16eff; --bg:#0a0a12; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--ink);
+    font-family:'Fragment Mono', monospace; }
+  #scene { position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  /* mirror PIP of the real camera */
+  #cam { position:fixed; right:14px; bottom:14px; width:min(26vw,180px); border-radius:14px;
+    transform:scaleX(-1); border:1px solid #ffffff22; box-shadow:0 8px 30px #000a; z-index:6;
+    opacity:.9; background:#000; display:none; }
+
+  .overlay { position:fixed; inset:0; z-index:20; display:grid; place-content:safe center;
+    justify-items:center; text-align:center; padding:24px; overflow:auto;
+    background:radial-gradient(ellipse at 50% 40%, #0a0a1288 0%, #0a0a12ee 75%);
+    backdrop-filter:blur(6px); transition:opacity .35s; }
+  .overlay.gone { opacity:0; pointer-events:none; }
+
+  .title { font-family:'Bangers', cursive; font-size:clamp(58px,12vw,140px); line-height:.9;
+    letter-spacing:.02em; text-shadow:4px 4px 0 var(--hot), 8px 8px 0 #7a0b3d; }
+  .title .zap { color:var(--violet); text-shadow:4px 4px 0 var(--cyan), 8px 8px 0 #0b4a7a; }
+  .tag { font-family:'Bangers', cursive; font-size:clamp(20px,4.5vw,34px); color:var(--cyan);
+    text-shadow:2px 2px 0 #0b4a7a; transform:rotate(-1deg); margin-top:6px; }
+  .sub { max-width:560px; margin:20px auto 0; font-size:14px; line-height:1.7; color:#c7c7d5; }
+  .sub b { color:#fff; }
+
+  .btnrow { display:flex; gap:14px; align-items:center; justify-content:center; flex-wrap:wrap; margin-top:26px; }
+  .btn { font-family:'Bangers', cursive; font-size:28px; letter-spacing:.05em; color:#0a0a12;
+    background:var(--lime); border:none; border-radius:14px; padding:15px 40px; cursor:pointer;
+    box-shadow:0 6px 0 #5c8a0e, 0 0 50px #b6ff2e44; transform:rotate(-1deg);
+    transition:transform .1s, box-shadow .1s; }
+  .btn:hover { transform:rotate(-1deg) scale(1.03); }
+  .btn:active { transform:rotate(-1deg) translateY(4px); box-shadow:0 2px 0 #5c8a0e; }
+  .btn.alt { background:transparent; color:#9aa; box-shadow:none; font-size:16px; padding:12px 20px; text-shadow:none; }
+  .btn.alt:hover { color:#fff; }
+
+  .hint { margin-top:18px; font-size:11px; color:#778; letter-spacing:.06em; }
+  .hint a { color:var(--cyan); text-decoration:none; }
+  .hint a:hover { text-decoration:underline; }
+  .privacy { margin-top:22px; font-size:10px; color:#667; letter-spacing:.06em; }
+  .privacy b { color:#9aa; font-weight:400; }
+
+  /* top HUD while running */
+  #hud { position:fixed; top:12px; left:0; right:0; z-index:6; display:flex; gap:10px;
+    align-items:center; justify-content:center; pointer-events:none; }
+  #status { font-size:11px; letter-spacing:.08em; color:#9aa; background:#12121ecc; padding:6px 12px;
+    border-radius:20px; border:1px solid #ffffff14; }
+  #status.warn { color:#ffd24f; border-color:#ffd24f44; }
+  #status.err { color:var(--hot); border-color:#ff2e8844; }
+
+  .toolbar { position:fixed; top:12px; right:12px; z-index:7; display:flex; gap:8px; }
+  .tool { pointer-events:auto; font-family:'Fragment Mono', monospace; font-size:12px; color:#cfe;
+    background:#12121ecc; border:1px solid #ffffff1c; border-radius:10px; padding:8px 12px; cursor:pointer; }
+  .tool:hover { border-color:#ffffff44; color:#fff; }
+
+  .footer { position:fixed; bottom:10px; left:0; right:0; z-index:6; text-align:center;
+    font-size:11px; color:#667; letter-spacing:.04em; pointer-events:none; }
+  .footer a { color:var(--cyan); text-decoration:none; pointer-events:auto; }
+  .footer a:hover { text-decoration:underline; }
+
+  .loader { display:inline-block; width:14px; height:14px; border:2px solid #ffffff33;
+    border-top-color:var(--cyan); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+<video id="cam" playsinline muted></video>
+
+<div id="hud"><div id="status">ready</div></div>
+<div class="toolbar" style="display:none" id="toolbar">
+  <button class="tool" id="pip">📷 cam</button>
+  <button class="tool" id="loadvrm">🎭 avatar</button>
+</div>
+
+<!-- LANDING -->
+<div class="overlay" id="boot">
+  <div>
+    <div class="title">AIR<span class="zap">MASK</span></div>
+    <div class="tag">WEAR ANY FACE</div>
+    <p class="sub">Your webcam drives a <b>3D avatar</b> in real time — head turns, blinks,
+      smiles, gaze and expressions, all read <b>100% on-device</b> in the browser
+      (MediaPipe Face Landmarker + WebGPU). Nothing about your camera is uploaded.</p>
+    <div class="btnrow">
+      <button class="btn" id="start">START ▸</button>
+      <button class="btn alt" id="pick">use your own .vrm</button>
+    </div>
+    <div class="hint">No avatar? Make a free one at <a href="https://vroid.com/en/studio" target="_blank" rel="noopener">VRoid</a> and drop the <b>.vrm</b> in — or start with the sample.</div>
+    <div class="privacy" id="boot-status">on-device face tracking · MediaPipe + WebGPU · no upload</div>
+  </div>
+</div>
+
+<input type="file" id="vrmfile" accept=".vrm" style="display:none">
+
+<div class="footer">
+  a sibling of <a href="https://airslice.dorkalev.com" target="_blank" rel="noopener">AIRSLICE</a> ·
+  by <a href="https://dorkalev.com" target="_blank" rel="noopener">Dor Kalev</a> ·
+  face tracking by <a href="https://ai.google.dev/edge/mediapipe" target="_blank" rel="noopener">MediaPipe</a>, from Google
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const $ = id => document.getElementById(id);
+const MODEL_TASK = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const WASM_BASE  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
+// a small VRM1 sample so first-run has an avatar; users can drop their own .vrm
+const DEFAULT_VRM = 'https://cdn.jsdelivr.net/gh/pixiv/three-vrm@v3.4.0/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';   // gh CDN (examples aren't in the npm pkg)
+const MIRROR = true;   // move right → avatar moves right (mirror), like a real mirror
+
+const setStatus = (t, cls='') => { const s=$('status'); s.className=cls; s.innerHTML=t; };
+const setBoot   = (t) => { $('boot-status').innerHTML = t; };
+
+// ---------------------------------------------------------------- three scene
+const canvas = $('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(28, 1, 0.1, 20);
+camera.position.set(0, 1.36, 1.9);            // roughly head-height, facing the avatar
+const lookTarget = new THREE.Vector3(0, 1.32, 0);
+camera.lookAt(lookTarget);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(1, 2, 2); scene.add(key);
+const rim = new THREE.DirectionalLight(0x8899ff, 1.0); rim.position.set(-2, 1, -1); scene.add(rim);
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+const clock = new THREE.Clock();
+let vrm = null, headBone = null;
+
+// ---------------------------------------------------------------- VRM loading
+async function loadVRM(url) {
+  setStatus('loading avatar… <span class="loader"></span>', 'warn');
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMLoaderPlugin(parser));
+  const gltf = await loader.loadAsync(url);
+  const next = gltf.userData.vrm;
+
+  if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); }
+  vrm = next;
+  VRMUtils.removeUnnecessaryVertices(gltf.scene);
+  VRMUtils.combineSkeletons(gltf.scene);
+  // VRM0 faces +Z (away from a +Z camera) → rotate to face us; VRM1 already faces -Z
+  if (vrm.meta?.metaVersion === '0') VRMUtils.rotateVRM0(vrm);
+  else vrm.scene.rotation.y = Math.PI;
+  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  scene.add(vrm.scene);
+  headBone = vrm.humanoid?.getNormalizedBoneNode('head') || null;
+  // aim gaze at the camera by default
+  if (vrm.lookAt) vrm.lookAt.target = camera;
+  setStatus('show me your face 🙂', 'warn');
+}
+
+// ------------------------------------------------------ MediaPipe FaceLandmarker
+let faceLandmarker = null;
+async function initFace() {
+  setBoot('loading face model… <span class="loader"></span>');
+  const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+  const fileset = await vision.FilesetResolver.forVisionTasks(WASM_BASE);
+  faceLandmarker = await vision.FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: MODEL_TASK, delegate: 'GPU' },
+    runningMode: 'VIDEO',
+    numFaces: 1,
+    outputFaceBlendshapes: true,
+    outputFacialTransformationMatrixes: true,
+  });
+}
+
+// ---------------------------------------------------------------- camera
+const video = $('cam');
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: 640, height: 480 }, audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+// -------------------------------------------- blendshapes → VRM expression map
+// MediaPipe emits 52 ARKit-style coefficients (0..1) by name; VRM exposes preset
+// expressions. We map the ones that read best on a stylized avatar.
+const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+function applyBlendshapes(cats) {
+  if (!vrm?.expressionManager) return;
+  const b = {}; for (const c of cats) b[c.categoryName] = c.score;
+  const em = vrm.expressionManager;
+  const L = MIRROR ? 'Right' : 'Left', R = MIRROR ? 'Left' : 'Right';   // mirror swap
+
+  // eyes / blink (per-eye so winks read)
+  em.setValue('blinkLeft',  clamp01((b['eyeBlink' + L] || 0) * 1.2));
+  em.setValue('blinkRight', clamp01((b['eyeBlink' + R] || 0) * 1.2));
+
+  // mouth: jaw open drives the "aa" viseme; smile → happy; frown → sad
+  const jaw = clamp01((b.jawOpen || 0) * 1.3);
+  const smile = clamp01(((b.mouthSmileLeft || 0) + (b.mouthSmileRight || 0)) / 2 * 1.4);
+  const frown = clamp01(((b.mouthFrownLeft || 0) + (b.mouthFrownRight || 0)) / 2 * 1.4);
+  const funnel = clamp01((b.mouthPucker || 0) + (b.mouthFunnel || 0));
+  em.setValue('aa', jaw);
+  em.setValue('ou', clamp01(funnel * 0.9));
+  em.setValue('happy', smile);
+  em.setValue('sad', clamp01(frown * 0.9));
+  // brows up → a touch of surprise
+  em.setValue('surprised', clamp01((b.browInnerUp || 0) * 0.8));
+
+  // gaze via look expressions (fall back silently if the model lacks them)
+  const gx = ((b['eyeLookOut' + L] || 0) - (b['eyeLookIn' + L] || 0));
+  const up = ((b.eyeLookUpLeft || 0) + (b.eyeLookUpRight || 0)) / 2;
+  const dn = ((b.eyeLookDownLeft || 0) + (b.eyeLookDownRight || 0)) / 2;
+  em.setValue('lookLeft',  clamp01(Math.max(0,  gx)));
+  em.setValue('lookRight', clamp01(Math.max(0, -gx)));
+  em.setValue('lookUp',    clamp01(up));
+  em.setValue('lookDown',  clamp01(dn));
+}
+
+// head pose from MediaPipe's 4x4 face transform (column-major)
+const _m = new THREE.Matrix4(), _e = new THREE.Euler();
+let headEuler = { x:0, y:0, z:0 };
+function applyHeadPose(matrixData) {
+  if (!headBone || !matrixData) return;
+  _m.fromArray(matrixData);
+  _e.setFromRotationMatrix(_m, 'YXZ');
+  // MediaPipe's frame is mirrored vs. a VTuber mirror; flip yaw/roll, damp pitch
+  const yaw   = (MIRROR ? -_e.y : _e.y);
+  const pitch = _e.x * 0.9;
+  const roll  = (MIRROR ? -_e.z : _e.z);
+  // light smoothing so the head doesn't jitter
+  headEuler.x += (pitch - headEuler.x) * 0.5;
+  headEuler.y += (yaw   - headEuler.y) * 0.5;
+  headEuler.z += (roll  - headEuler.z) * 0.5;
+  headBone.rotation.set(headEuler.x, headEuler.y, headEuler.z);
+}
+
+// idle life so a still face isn't a mannequin: gentle blink + breathing sway
+let blinkT = 0, nextBlink = 2;
+function idle(dt, gotFace) {
+  if (!vrm) return;
+  const t = clock.elapsedTime;
+  vrm.scene.position.y = Math.sin(t * 1.1) * 0.004;         // breathing
+  vrm.scene.rotation.z = Math.sin(t * 0.7) * 0.01;
+  if (!gotFace && vrm.expressionManager) {                   // auto-blink when no face
+    blinkT += dt;
+    const phase = blinkT % nextBlink;
+    const bl = phase > nextBlink - 0.15 ? 1 : 0;
+    vrm.expressionManager.setValue('blink', bl);
+    if (phase < dt) nextBlink = 2 + Math.random() * 3;
+  }
+}
+
+// ---------------------------------------------------------------- main loop
+let running = false, lastVideoTime = -1, faceMs = 0;
+function loop() {
+  if (!running) return;
+  requestAnimationFrame(loop);
+  const dt = clock.getDelta();
+  let gotFace = false;
+
+  if (faceLandmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    try {
+      const res = faceLandmarker.detectForVideo(video, performance.now());
+      if (res.faceBlendshapes?.length) {
+        applyBlendshapes(res.faceBlendshapes[0].categories);
+        applyHeadPose(res.facialTransformationMatrixes?.[0]?.data);
+        gotFace = true;
+        if (!faceMs) setStatus('tracking · you are the avatar 🎭');
+        faceMs = performance.now();
+      }
+    } catch (e) { /* transient frame errors are fine */ }
+  }
+  if (gotFace) faceMs = performance.now();
+  else if (faceMs && performance.now() - faceMs > 800) { setStatus('no face — come into frame', 'warn'); faceMs = 0; }
+
+  idle(dt, gotFace);
+  if (vrm) vrm.update(dt);
+  renderer.render(scene, camera);
+}
+
+// ---------------------------------------------------------------- boot flow
+let engaged = false;
+async function engage(vrmUrl) {
+  if (engaged) return; engaged = true;
+  $('boot').classList.add('gone');
+  $('toolbar').style.display = '';
+  try {
+    setBoot('starting camera…');
+    await Promise.all([startCamera(), initFace()]);
+    await loadVRM(vrmUrl || DEFAULT_VRM).catch(async (e) => {
+      console.warn('default VRM failed, asking for a file', e);
+      setStatus('couldn\'t load the sample avatar — drop a .vrm', 'err');
+      $('vrmfile').click();
+    });
+    running = true; clock.start(); loop();
+  } catch (e) {
+    console.error(e);
+    engaged = false;
+    $('boot').classList.remove('gone');
+    setBoot('camera/model failed: ' + (e.name || e.message) + ' — check camera permission & WebGPU');
+  }
+}
+
+$('start').onclick = () => engage();
+$('pick').onclick  = () => $('vrmfile').click();
+$('loadvrm').onclick = () => $('vrmfile').click();
+$('pip').onclick = () => { video.style.display = video.style.display === 'block' ? 'none' : 'block'; };
+$('vrmfile').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  if (!engaged) await engage(url);
+  else await loadVRM(url).catch(() => setStatus('that .vrm failed to load', 'err'));
+};
+
+// debug handle
+window.__airmask = { get vrm(){return vrm;}, scene, camera, get running(){return running;} };
+</script>
+</body>
+</html>
