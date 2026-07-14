@@ -1,12 +1,14 @@
-// Deployment config — fill in with your own Firebase web app values (Stage 2:
-// recording + shareable gallery). The core face→avatar demo needs none of this.
+// Shared backend: all AIR demos record into the AIRSLICE Firebase project.
+// These are client-side identifiers (safe to ship) — real protection is the
+// Storage rules + App Check, not hiding these values.
 export const FIREBASE_CONFIG = {
-  apiKey: 'YOUR_API_KEY',
-  authDomain: 'YOUR_PROJECT.firebaseapp.com',
-  projectId: 'YOUR_PROJECT',
-  storageBucket: 'YOUR_PROJECT.firebasestorage.app',
-  appId: 'YOUR_APP_ID',
+  apiKey: 'AIzaSyAetL9_LGXJJf0u70hbcpoxaOK3p9KgsRw',
+  authDomain: 'airslice-5b3e3.firebaseapp.com',
+  projectId: 'airslice-5b3e3',
+  storageBucket: 'airslice-5b3e3.firebasestorage.app',
+  appId: '1:154550220274:web:80949d7333d213ede4e76b',
 };
-export const APPCHECK_SITE_KEY = '';          // reCAPTCHA v3 site key ('' disables App Check)
-export const CANON_HOST = '';                  // e.g. 'airmask.dorkalev.com' ('' disables the redirect)
-export const ADMIN_EMAIL = 'you@example.com';  // must match isAdmin() in storage.rules
+export const APPCHECK_SITE_KEY = '6Leph08tAAAAAAiMIC2TB930zt99EaMjXBzidX6c';   // reCAPTCHA v3
+export const CANON_HOST = '';                     // e.g. 'airmask.dorkalev.com' ('' disables the redirect)
+export const ADMIN_EMAIL = 'dor@dorkalev.com';   // only this (verified) account can moderate
+export const DEMO = 'airmask';                    // namespaces this demo's sessions in the shared bucket
